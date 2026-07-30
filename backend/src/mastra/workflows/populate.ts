@@ -12,6 +12,13 @@ import { saveRunMetrics } from "../save-run-metrics.js";
 import { getSignal } from "../../abort-registry.js";
 
 /**
+ * Hard ceiling on orchestrator tool-call steps for one populate run. Sized so
+ * a large dataset can actually complete (each row costs ~1 step) while still
+ * bounding a runaway agent loop.
+ */
+const ORCHESTRATOR_MAX_STEPS = 2_000;
+
+/**
  * Server-set auth/run context threaded through every step.
  *
  * The HTTP route (`/populate` in `src/index.ts`) fills this in from the
@@ -301,7 +308,16 @@ const agentStep = createStep({
         metrics,
       );
       const abortSignal = getSignal(inputData.authorizedDatasetId);
-      const result = await agent.generate(inputData.prompt, { abortSignal, maxSteps: 80 });
+      // * maxSteps is the REAL row ceiling, not maxRowCount: the orchestrator
+      // * spends one step per `run_subagent` (i.e. per row) plus steps on
+      // * search_web/fetch_page discovery. At the previous fixed 80 a run
+      // * topped out around 30-60 rows however large maxRowCount was. Scale it
+      // * with the request instead, with headroom for discovery overhead.
+      const maxSteps = Math.min(
+        Math.max(inputData.maxRowCount * 2 + 40, 80),
+        ORCHESTRATOR_MAX_STEPS,
+      );
+      const result = await agent.generate(inputData.prompt, { abortSignal, maxSteps });
       metrics.addOrchestratorResult(result);
       // Use result.toolCalls (flat accumulated list) — same reasoning as investigate-tool.ts.
       metrics.countToolCalls(result.toolCalls ?? []);

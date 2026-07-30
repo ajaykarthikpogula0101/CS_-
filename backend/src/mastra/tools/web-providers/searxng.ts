@@ -10,11 +10,67 @@ import type { WebProvider, SearchOutput, FetchOutput } from "./index.js";
 const SEARXNG_URL = (process.env.SEARXNG_URL || "http://searxng:8080").replace(/\/$/, "");
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
 
+/** Roughly how many results one SearXNG page yields. */
+const RESULTS_PER_PAGE = 10;
+/** Results to return per search — was 10 (a single page). */
+const TARGET_RESULTS = 50;
+/** Page cap so one query can't hammer the instance. */
+const MAX_PAGES = 5;
+
 async function searchWeb(query: string): Promise<SearchOutput> {
   if (!query?.trim()) return { error: "query is required and cannot be empty." };
 
-  const url = `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}&format=json`;
   console.log(`[search_web:searxng] Searching SearXNG: "${query}"`);
+
+  const collected: Array<{ title: string; snippet: string; url: string }> = [];
+  const seen = new Set<string>();
+  const pagesNeeded = Math.min(
+    Math.ceil(TARGET_RESULTS / RESULTS_PER_PAGE),
+    MAX_PAGES,
+  );
+
+  for (let pageno = 1; pageno <= pagesNeeded; pageno++) {
+    const page = await searchWebPage(query, pageno);
+    // Propagate a hard backend error only if we have nothing at all yet;
+    // otherwise keep what we collected from earlier pages.
+    if ("error" in page) {
+      if (collected.length === 0) return page;
+      break;
+    }
+    if (page.results.length === 0) {
+      if (pageno === 1 && collected.length === 0) {
+        return {
+          results: [],
+          error:
+            "No results found for this query. Try a broader search or use synthetic data.",
+        };
+      }
+      break; // exhausted
+    }
+    for (const r of page.results) {
+      if (seen.has(r.url)) continue; // pages overlap across engines
+      seen.add(r.url);
+      collected.push(r);
+    }
+    if (collected.length >= TARGET_RESULTS) break;
+  }
+
+  console.log(`[search_web:searxng] Got ${collected.length} results across pages`);
+  return { results: collected.slice(0, TARGET_RESULTS) };
+}
+
+async function searchWebPage(
+  query: string,
+  pageno: number,
+): Promise<
+  | { results: Array<{ title: string; snippet: string; url: string }> }
+  | { error: string }
+> {
+  // * `pageno` was never sent, so every search saw only page 1 (~10 URLs)
+  // * regardless of how many entities the orchestrator still needed.
+  const url =
+    `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}&format=json` +
+    `&pageno=${pageno}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -37,7 +93,6 @@ async function searchWeb(query: string): Promise<SearchOutput> {
 
     const data = await res.json();
     const results = (data.results ?? [])
-      .slice(0, 10)
       .map((r: Record<string, unknown>) => ({
         title: (r.title as string) ?? "",
         snippet: ((r.content as string) ?? "").trim(),
@@ -45,9 +100,8 @@ async function searchWeb(query: string): Promise<SearchOutput> {
       }))
       .filter((r: { url: string }) => r.url);
 
-    console.log(`[search_web:searxng] Got ${results.length} results`);
-    if (results.length === 0)
-      return { results: [], error: "No results found for this query. Try a broader search or use synthetic data." };
+    // An empty page just means "no more" to the paginating caller, which
+    // decides whether that is an error (page 1) or exhaustion (page N).
     return { results };
   } catch (err) {
     clearTimeout(timeout);
