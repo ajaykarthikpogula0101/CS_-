@@ -54,6 +54,15 @@ export const env = {
   // Exa API key. Required only when the Exa engine is active.
   EXA_API_KEY: process.env.EXA_API_KEY,
 
+  // Page loader for the SearXNG engine's fetch_page (read directly by
+  // web-providers/searxng.ts). "fallback" = direct first, Camofox only when
+  // direct fails (default), "direct" = plain fetch only, "camofox" = every
+  // page via the Camofox stealth browser. Camofox modes need a camofox-browser
+  // server at CAMOFOX_URL; if it is down, fallback degrades to direct.
+  FETCH_ENGINE: process.env.FETCH_ENGINE ?? "fallback",
+  CAMOFOX_URL: process.env.CAMOFOX_URL ?? "http://127.0.0.1:9377",
+  CAMOFOX_CONCURRENCY: numberFromEnv("CAMOFOX_CONCURRENCY", 5),
+
   // Default models — used when a user has not saved a preference.
   // Each must be a valid OpenRouter model slug.
   SCHEMA_INFERENCE_MODEL:

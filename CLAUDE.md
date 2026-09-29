@@ -30,11 +30,14 @@ The schema inference pipeline: frontend calls `POST /infer-schema` → Fastify v
 
 The populate pipeline: frontend calls `POST /populate` with `{ datasetId, datasetName, description, columns }` → Fastify verifies the Clerk JWT → triggers `populateWorkflow` which: (1) clears existing rows, (2) builds a prompt from the schema, (3) runs the populate agent (Claude Sonnet 4.6) which searches the web via the self-hosted SearXNG backend (or Exa when that engine is selected), then inserts rows into Convex one by one. Rows appear in realtime on the frontend via Convex reactive queries.
 
+Page loading for the SearXNG engine's `fetch_page` is selected by `FETCH_ENGINE` (`backend/src/mastra/tools/web-providers/searxng.ts`): `fallback` (default) tries a plain fetch + Readability first and only uses Camofox when the result is an error, a bot-wall page, or under 200 chars of text; `direct` never uses Camofox; `camofox` renders every page in the Camofox stealth browser via a self-hosted camofox-browser REST server (`web-providers/camofox.ts`). Fallback skips Camofox for dead URLs (404/405/410, DNS failure) and, for 30 min, for hosts that blocked Camofox too; if the server is unreachable it is skipped for 60s and the direct result is returned. Camofox renders are capped at `CAMOFOX_CONCURRENCY` (default 5), each slot using its own camofox userId: the server destroys a user's whole browser session after repeated navigation failures, so do not collapse them into one shared userId. Both loaders share `web-providers/html-extract.ts`. The Exa engine is unaffected.
+
 Convex functions use `ctx.auth.getUserIdentity()` to get the authenticated user. The `ownerId` field on datasets stores `identity.subject` (Clerk user ID). Do not pass `ownerId` from the client.
 
 ## Environment Variables
 
 Root `.env` is the only local env file. Docker Compose, package scripts, and Convex CLI helper targets all read it. Key variables:
+- `FETCH_ENGINE` / `CAMOFOX_URL` / `CAMOFOX_CONCURRENCY` — page loader for `fetch_page` (`fallback` default, `direct`, `camofox`). Camofox modes need a camofox-browser server; inside Docker the URL defaults to `http://host.docker.internal:9377` (override with `CAMOFOX_URL_DOCKER`).
 - `SEARCH_PROVIDER` / `EXA_API_KEY` — select the agent web engine (`searxng` default, or `exa`). SearXNG needs no key; Exa needs `EXA_API_KEY`.
 - `OPENROUTER_API_KEY` — used by backend and Mastra for AI model calls
 - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` — shared by frontend and backend

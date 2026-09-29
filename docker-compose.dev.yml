@@ -46,6 +46,8 @@ services:
       ADMIN_USER_IDS: ${ADMIN_USER_IDS:-}
       # Open-source web backend (SearXNG metasearch + Readability).
       SEARXNG_URL: http://searxng:8080
+      # Camofox stealth browser (FETCH_ENGINE=camofox|fallback), run on the host.
+      CAMOFOX_URL: ${CAMOFOX_URL_DOCKER:-http://host.docker.internal:9377}
       # Transactional email — when unset, the email module no-ops.
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-ChampSet <noreply@championsmail.com>}
@@ -57,6 +59,8 @@ services:
       REFRESH_SCHEDULER_POLL_MS: ${REFRESH_SCHEDULER_POLL_MS:-60000}
       REFRESH_SCHEDULER_BATCH_SIZE: ${REFRESH_SCHEDULER_BATCH_SIZE:-5}
       REFRESH_SCHEDULER_STALE_AFTER_MS: ${REFRESH_SCHEDULER_STALE_AFTER_MS:-21600000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       convex:
         condition: service_healthy
@@ -85,6 +89,10 @@ services:
       CONVEX_SELF_HOSTED_ADMIN_KEY: ${CONVEX_SELF_HOSTED_ADMIN_KEY:-}
       # Open-source web backend (SearXNG metasearch + Readability).
       SEARXNG_URL: http://searxng:8080
+      # Camofox stealth browser (FETCH_ENGINE=camofox|fallback), run on the host.
+      CAMOFOX_URL: ${CAMOFOX_URL_DOCKER:-http://host.docker.internal:9377}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       convex:
         condition: service_healthy

@@ -1,14 +1,52 @@
 // "Proprietary" web provider: self-hosted SearXNG metasearch + Mozilla
 // Readability page extraction. No third-party data API, no per-call vendor.
 // This is ChampSet's owned engine (the A side of the A/B toggle).
-import { JSDOM } from "jsdom";
-import { Readability } from "@mozilla/readability";
-import TurndownService from "turndown";
-import { finalizeText, USER_AGENT, FETCH_TIMEOUT_MS } from "./text-util.js";
+//
+// Page loading is selected by FETCH_ENGINE:
+//   - "fallback" (default) direct first; Camofox only when direct fails, is
+//                blocked, or returns too little text (JS-only pages)
+//   - "direct"   plain HTTP fetch + Readability only
+//   - "camofox"  every page rendered in the Camofox stealth browser
+import { USER_AGENT, FETCH_TIMEOUT_MS } from "./text-util.js";
+import { extractPage, isUsable } from "./html-extract.js";
+import { camofoxFetch, camofoxLoad } from "./camofox.js";
 import type { WebProvider, SearchOutput, FetchOutput } from "./index.js";
 
 const SEARXNG_URL = (process.env.SEARXNG_URL || "http://searxng:8080").replace(/\/$/, "");
-const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+
+export type FetchEngine = "direct" | "camofox" | "fallback";
+export const FETCH_ENGINE: FetchEngine =
+  process.env.FETCH_ENGINE === "camofox" || process.env.FETCH_ENGINE === "direct"
+    ? process.env.FETCH_ENGINE
+    : "fallback";
+
+// No successful direct fetch took over 15s in the 300-URL benchmark, and a
+// slow direct attempt only delays the Camofox fallback.
+const DIRECT_FETCH_TIMEOUT_MS = 15_000;
+
+// Dead URLs a browser can't fix: never worth a ~20s Camofox render.
+const DEAD_STATUSES = new Set([404, 405, 410]);
+
+// Hosts that blocked even Camofox are skipped for a while, so an agent that
+// keeps hitting the same walled site pays the render cost once, not per page.
+const CAMOFOX_BLOCKED_TTL_MS = 30 * 60_000;
+const camofoxBlockedHosts = new Map<string, number>();
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function camofoxKnownBlocked(host: string): boolean {
+  const until = camofoxBlockedHosts.get(host);
+  if (until === undefined) return false;
+  if (Date.now() < until) return true;
+  camofoxBlockedHosts.delete(host);
+  return false;
+}
 
 /** Roughly how many results one SearXNG page yields. */
 const RESULTS_PER_PAGE = 10;
@@ -120,10 +158,29 @@ async function fetchPage(targetUrl: string): Promise<FetchOutput> {
   if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://"))
     return { error: `Invalid URL "${targetUrl}". Must start with http:// or https://.` };
 
+  if (FETCH_ENGINE === "camofox") return camofoxFetch(targetUrl);
+
+  const { out, status, dnsFailure } = await directFetch(targetUrl);
+  if (FETCH_ENGINE === "direct" || isUsable(out)) return out;
+  if (dnsFailure || (status !== undefined && DEAD_STATUSES.has(status))) return out;
+
+  const host = hostOf(targetUrl);
+  if (camofoxKnownBlocked(host)) return out;
+
+  console.log(`[fetch_page:fallback] Direct fetch unusable, retrying with Camofox: ${targetUrl}`);
+  const rendered = await camofoxLoad(targetUrl);
+  if (rendered.blocked) camofoxBlockedHosts.set(host, Date.now() + CAMOFOX_BLOCKED_TTL_MS);
+  // If the browser failed too, the direct result (text or its error) is the better answer.
+  return rendered.out.error ? out : rendered.out;
+}
+
+async function directFetch(
+  targetUrl: string,
+): Promise<{ out: FetchOutput; status?: number; dnsFailure?: boolean }> {
   console.log(`[fetch_page:searxng] Fetching: ${targetUrl}`);
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), DIRECT_FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(targetUrl, {
       headers: {
@@ -134,44 +191,32 @@ async function fetchPage(targetUrl: string): Promise<FetchOutput> {
       signal: controller.signal,
     });
     clearTimeout(timeout);
+    const status = res.status;
 
     if (!res.ok) {
-      if (res.status === 404)
-        return { error: "Page not found (404). The URL may be outdated. Try a different one." };
-      if (res.status === 403 || res.status === 401)
-        return { error: "This site blocks automated access. Use the search snippet data instead." };
-      if (res.status === 429)
-        return { error: "Fetch rate limit hit. Use data from search snippets instead." };
-      return { error: `Site returned HTTP ${res.status}. Try a different URL or use search snippet data.` };
+      if (status === 404)
+        return { status, out: { error: "Page not found (404). The URL may be outdated. Try a different one." } };
+      if (status === 403 || status === 401)
+        return { status, out: { error: "This site blocks automated access. Use the search snippet data instead." } };
+      if (status === 429)
+        return { status, out: { error: "Fetch rate limit hit. Use data from search snippets instead." } };
+      return { status, out: { error: `Site returned HTTP ${status}. Try a different URL or use search snippet data.` } };
     }
 
     const contentType = res.headers.get("content-type") ?? "";
     const raw = await res.text();
-
-    if (!contentType.includes("html")) {
-      return finalizeText(undefined, raw);
-    }
-
-    const dom = new JSDOM(raw, { url: targetUrl });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
-
-    if (article?.content) {
-      const markdown = turndown.turndown(article.content);
-      return finalizeText(article.title ?? undefined, markdown);
-    }
-
-    const bodyText = dom.window.document.body?.textContent?.trim() ?? "";
-    if (bodyText) return finalizeText(dom.window.document.title || undefined, bodyText);
-
-    return { error: "Page loaded but had no extractable text content. Try a different URL." };
+    return { status, out: extractPage(raw, targetUrl, contentType) };
   } catch (err) {
     clearTimeout(timeout);
     if (err instanceof Error && err.name === "AbortError")
-      return { error: "Page fetch timed out. Try a different URL or use search snippet data." };
+      return { out: { error: "Page fetch timed out. Try a different URL or use search snippet data." } };
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[fetch_page:searxng] Failed:`, msg);
-    return { error: `Fetch failed: ${msg}. Use data from search snippets instead.` };
+    const code = (err as { cause?: { code?: string } })?.cause?.code;
+    console.error(`[fetch_page:searxng] Failed:`, msg, code ?? "");
+    return {
+      dnsFailure: code === "ENOTFOUND",
+      out: { error: `Fetch failed: ${msg}. Use data from search snippets instead.` },
+    };
   }
 }
 
