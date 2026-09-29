@@ -1,7 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { buildPopulateTools } from "../tools/dataset-tools.js";
-import { buildWebTools } from "../tools/web-tools.js";
+import { BROWSE_TOOL_HINT, buildBrowseTools, buildWebTools } from "../tools/web-tools.js";
 import { getWebProvider, resolveProviderName } from "../tools/web-providers/index.js";
 import type { AuthContext } from "../workflows/populate.js";
 import type { PopulateColumn } from "../../pipeline/populate.js";
@@ -34,7 +34,7 @@ RULES:
 TOOL CALL FORMAT — every tool call argument must be a JSON object wrapped in curly braces:
   search_web: {"query": "your search terms"}
   fetch_page: {"url": "https://example.com"}
-  insert_row: {"data": {${columnNames.map((n) => `"${n}": "value"`).join(", ")}}, "sources": ["https://url-you-fetched.com"], "row_summary": "one line about this entity", "how_found": "step by step guide on how to extract the data so an agent in the future can do it too"}
+${BROWSE_TOOL_HINT}  insert_row: {"data": {${columnNames.map((n) => `"${n}": "value"`).join(", ")}}, "sources": ["https://url-you-fetched.com"], "row_summary": "one line about this entity", "how_found": "step by step guide on how to extract the data so an agent in the future can do it too"}
 
 WORKFLOW:
 1. Fetch 1-2 of the provided URLs to get real data (if URLs were given).
@@ -81,6 +81,7 @@ export function buildInvestigateAgent(
       insert_row,
       search_web,
       fetch_page,
+      ...buildBrowseTools(),
     },
   });
 }

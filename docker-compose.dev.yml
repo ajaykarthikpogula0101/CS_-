@@ -48,6 +48,8 @@ services:
       SEARXNG_URL: http://searxng:8080
       # Camofox stealth browser (FETCH_ENGINE=camofox|fallback), run on the host.
       CAMOFOX_URL: ${CAMOFOX_URL_DOCKER:-http://host.docker.internal:9377}
+      # jev-browse sidecar (browse_page tool), run on the host. Empty = tool off.
+      JEV_BROWSE_URL: ${JEV_BROWSE_URL_DOCKER:-}
       # Transactional email — when unset, the email module no-ops.
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-ChampSet <noreply@championsmail.com>}
@@ -91,6 +93,8 @@ services:
       SEARXNG_URL: http://searxng:8080
       # Camofox stealth browser (FETCH_ENGINE=camofox|fallback), run on the host.
       CAMOFOX_URL: ${CAMOFOX_URL_DOCKER:-http://host.docker.internal:9377}
+      # jev-browse sidecar (browse_page tool), run on the host. Empty = tool off.
+      JEV_BROWSE_URL: ${JEV_BROWSE_URL_DOCKER:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

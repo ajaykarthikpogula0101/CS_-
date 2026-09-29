@@ -1,7 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { buildPopulateTools } from "../tools/dataset-tools.js";
-import { buildWebTools } from "../tools/web-tools.js";
+import { BROWSE_TOOL_HINT, buildBrowseTools, buildWebTools } from "../tools/web-tools.js";
 import { getWebProvider, resolveProviderName } from "../tools/web-providers/index.js";
 import type { AuthContext } from "../workflows/populate.js";
 import type { PopulateColumn } from "../../pipeline/populate.js";
@@ -38,7 +38,7 @@ RULES:
 
 TOOL CALL FORMAT — every tool call argument must be a JSON object wrapped in curly braces:
   fetch_page: {"url": "https://example.com"}
-  search_web: {"query": "your search terms"}
+${BROWSE_TOOL_HINT}  search_web: {"query": "your search terms"}
   update_row: {"rowId": "<id>", "data": {${columnNames.map((n) => `"${n}": "value"`).join(", ")}}, "sources": ["https://..."], "row_summary": "one line about this entity", "how_found": "how you verified this data"}
 
 WORKFLOW:
@@ -78,6 +78,7 @@ export function buildRefreshAgent(
       update_row,
       search_web,
       fetch_page,
+      ...buildBrowseTools(),
     },
   });
 }

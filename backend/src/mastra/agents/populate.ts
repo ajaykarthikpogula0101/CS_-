@@ -1,7 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { buildSubagentTool } from "../tools/investigate-tool.js";
-import { buildWebTools } from "../tools/web-tools.js";
+import { buildBrowseTools, buildWebTools } from "../tools/web-tools.js";
 import { getWebProvider, resolveProviderName } from "../tools/web-providers/index.js";
 import type { AuthContext } from "../workflows/populate.js";
 import type { PopulateColumn } from "../../pipeline/populate.js";
@@ -62,6 +62,7 @@ export function buildPopulateAgent(
     tools: {
       search_web,
       fetch_page,
+      ...buildBrowseTools(),
       run_subagent: buildSubagentTool(
         authorizedDatasetId,
         authContext,

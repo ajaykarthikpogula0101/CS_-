@@ -63,6 +63,12 @@ export const env = {
   CAMOFOX_URL: process.env.CAMOFOX_URL ?? "http://127.0.0.1:9377",
   CAMOFOX_CONCURRENCY: numberFromEnv("CAMOFOX_CONCURRENCY", 5),
 
+  // jev-browse sidecar (services/jev-browse) behind the browse_page tool,
+  // read directly by web-providers/jev-browse.ts. Unset = agents do not get
+  // the tool. JEV_BROWSE_TOKEN must match the sidecar's token when it has one.
+  JEV_BROWSE_URL: process.env.JEV_BROWSE_URL ?? "",
+  JEV_BROWSE_TOKEN: process.env.JEV_BROWSE_TOKEN,
+
   // Default models — used when a user has not saved a preference.
   // Each must be a valid OpenRouter model slug.
   SCHEMA_INFERENCE_MODEL:
