@@ -109,11 +109,21 @@ def results_page(query):
 <p>ACME LTD | Company number 01234567 | Status: Active</p>""".encode()
 
 
+# Visible text changes every 30 ms, so a TYPE_TEXT decision is always stale before it can run.
+TICKING_PAGE = b"""<!doctype html><title>Live</title>
+<label for="q">Company name</label> <input id="q" name="q" type="text">
+<p id="clock"></p><script>setInterval(() => clock.textContent = performance.now(), 30)</script>"""
+
+
 class Site(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/results":
             body = results_page(parse_qs(parsed.query).get("q", [""])[0])
+        elif parsed.path == "/ticking":
+            body = TICKING_PAGE
+        elif parsed.path == "/agent":
+            body = f"<!doctype html><title>UA</title><p>{self.headers.get('User-Agent')}</p>".encode()
         else:
             body = SEARCH_PAGE
         self.send_response(200)
@@ -216,3 +226,45 @@ def test_model_failure_is_reported_not_raised(chrome, sidecar, site, monkeypatch
     assert status == 200 and out["status"] == "error"
     assert "HTTP 500" in out["error"]
     assert "Find a company" in out["text"]  # still returns what the page showed
+
+
+@pytest.mark.browser
+def test_decisions_that_never_execute_stop_early(chrome, sidecar, site, monkeypatch):
+    calls = []
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", fake_models(calls))
+
+    status, out = call(sidecar, "/browse", {"url": site + "/ticking", "goal": "Look up Acme"})
+
+    assert status == 200 and out["status"] == "stuck", out
+    assert out["steps"] == []
+    assert out["decisions"] == server.MAX_IDLE_DECISIONS  # stopped at the cap, not at the 60s timeout
+    assert out["last_choice"] == {"operation": "TYPE_TEXT", "element": "Company name"}
+    assert not any("typesafe" not in url for url in calls)  # stale before typing: no text-helper spend
+
+
+@pytest.mark.browser
+def test_unloadable_page_fails_without_asking_jev(chrome, sidecar, monkeypatch):
+    calls = []
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", fake_models(calls))
+
+    status, out = call(sidecar, "/browse", {"url": "http://127.0.0.1:9/", "goal": "Look up Acme"})
+
+    assert status == 200 and out["status"] == "error"
+    assert "ERR_CONNECTION_REFUSED" in out["error"]
+    assert calls == [] and out["decisions"] == 0
+
+
+@pytest.mark.browser
+def test_browser_does_not_announce_headless(chrome, site):
+    from jev_ultrafast.browser import Browser
+
+    browser = Browser(site + "/agent")
+    try:
+        assert "HeadlessChrome" not in browser.evaluate("navigator.userAgent")
+        sent = browser.evaluate("document.body.innerText")
+        assert "Chrome/" in sent and "HeadlessChrome" not in sent  # the header sites actually see
+    finally:
+        browser.close()

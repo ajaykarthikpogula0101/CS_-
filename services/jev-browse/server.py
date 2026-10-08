@@ -9,8 +9,10 @@ which fetch_page (read-only) cannot reach.
 API:
   GET  /health  -> {"ok": true, "typesafe_configured": bool, ...}
   POST /browse  {"url": "https://...", "goal": "...", "timeout_s": 60, "max_actions": 25}
-             -> {"status": "done"|"blocked"|"timeout"|"step_limit"|"error",
-                 "url", "title", "text", "steps", "elapsed_ms", "error"}
+             -> {"status": "done"|"blocked"|"stuck"|"timeout"|"step_limit"|"error",
+                 "url", "title", "text", "steps", "elapsed_ms", "error", "last_choice"}
+  "stuck" = several Jev decisions in a row produced no action (the page kept changing);
+  the run stops early because each decision is billed.
 
 Configuration (env):
   TYPESAFE_API_KEY          required for /browse
@@ -66,6 +68,7 @@ MAX_GOAL_CHARS = 2000
 MAX_TEXT_CHARS = 100_000
 DEFAULT_TIMEOUT_S, MIN_TIMEOUT_S, MAX_TIMEOUT_S = 60, 5, 120
 DEFAULT_MAX_ACTIONS, MAX_ACTIONS = 25, 60
+MAX_IDLE_DECISIONS = 6
 QUEUE_WAIT_S = 30
 
 slots = threading.BoundedSemaphore(max(1, int(os.environ.get("JEV_BROWSE_CONCURRENCY") or 2)))
@@ -120,31 +123,53 @@ def launch_chrome():
         args.append("--headless=new")
     if os.environ.get("JEV_BROWSE_NO_SANDBOX") == "1":
         args.append("--no-sandbox")
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cdp_url = f"http://127.0.0.1:{port}"
+    procs = []
 
     def stop():
         stop_daemon()
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        for proc in procs:
+            _stop_chrome(proc)
         shutil.rmtree(profile, ignore_errors=True)
 
     atexit.register(stop)
-    cdp_url = f"http://127.0.0.1:{port}"
+    version = _start_chrome(args, cdp_url, procs)
+    # Headless Chrome announces itself as "HeadlessChrome", which sites block on sight.
+    # Restart once with the same browser's normal user agent.
+    agent_string = version.get("User-Agent", "")
+    if "HeadlessChrome" in agent_string:
+        _stop_chrome(procs.pop())
+        version = _start_chrome([*args, f"--user-agent={agent_string.replace('HeadlessChrome', 'Chrome')}"],
+                                cdp_url, procs)
+    if version is None:
+        stop()
+        raise RuntimeError(f"Chrome did not open remote debugging on port {port}")
+    os.environ["BU_CDP_URL"] = cdp_url
+    return stop
+
+
+def _start_chrome(args, cdp_url, procs):
+    """Start Chrome and wait for its debugging endpoint. Returns /json/version, or None."""
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(proc)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
-            urllib.request.urlopen(cdp_url + "/json/version", timeout=1).close()
-            os.environ["BU_CDP_URL"] = cdp_url
-            return stop
+            with urllib.request.urlopen(cdp_url + "/json/version", timeout=1) as res:
+                return json.loads(res.read())
         except OSError:
             if proc.poll() is not None:
-                break
+                return None
             time.sleep(0.2)
-    stop()
-    raise RuntimeError(f"Chrome did not open remote debugging on port {port}")
+    return None
+
+
+def _stop_chrome(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def _sum_usage(entries):
@@ -167,6 +192,18 @@ def _read_page(agent):
     return {"url": last.get("url"), "title": last.get("title"), "text": last.get("text", "")}
 
 
+def _last_choice(state):
+    """What Jev chose last, for error reports: operation and the element's label."""
+    if not state["decisions"]:
+        return None
+    decision = state["decisions"][-1]
+    label = None
+    if decision.get("target"):
+        elements = decision.get("request", {}).get("state", {}).get("elements", [])
+        label = next((e.get("label") for e in elements if e.get("index") == decision["target"].split(":")[0]), None)
+    return {"operation": decision.get("operation"), "element": label}
+
+
 def run_task(url, goal, timeout_s=DEFAULT_TIMEOUT_S, max_actions=DEFAULT_MAX_ACTIONS):
     """Run one goal to completion or a limit. Never raises for task-level failures."""
     started = time.monotonic()
@@ -177,6 +214,16 @@ def run_task(url, goal, timeout_s=DEFAULT_TIMEOUT_S, max_actions=DEFAULT_MAX_ACT
         return {"status": "error", "error": f"Browser could not open the page: {exc}", "url": url,
                 "title": None, "text": "", "steps": [], "elapsed_ms": round((time.monotonic() - started) * 1000)}
     with agent:
+        # Chrome's own error page (TLS failure, DNS, refused): no point asking Jev about it.
+        if (agent.state["page"].get("url") or "").startswith("chrome-error://"):
+            page = _read_page(agent)
+            reason = next((line for line in (page.get("text") or "").splitlines() if "ERR_" in line), "")
+            return {"status": "error", "error": f"Browser could not load the page {reason}".strip(), "url": url,
+                    "title": page.get("title"), "text": "", "steps": [], "decisions": 0,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000)}
+        # Decisions are billed even when the page changes before the chosen action can run.
+        # Stop once several in a row have produced no action, instead of looping to the timeout.
+        actions_seen, acted_at = 0, 0
         try:
             for state in agent.run():
                 if time.monotonic() - started > timeout_s:
@@ -184,6 +231,11 @@ def run_task(url, goal, timeout_s=DEFAULT_TIMEOUT_S, max_actions=DEFAULT_MAX_ACT
                     break
                 if len(state["history"]) >= max_actions:
                     status = "step_limit"
+                    break
+                if len(state["history"]) > actions_seen:
+                    actions_seen, acted_at = len(state["history"]), len(state["decisions"])
+                if len(state["decisions"]) - acted_at >= MAX_IDLE_DECISIONS:
+                    status, error = "stuck", "The page kept changing before any chosen action could run."
                     break
             else:
                 status = agent.state["status"]
@@ -194,6 +246,7 @@ def run_task(url, goal, timeout_s=DEFAULT_TIMEOUT_S, max_actions=DEFAULT_MAX_ACT
         return {
             "status": status,
             "error": error,
+            "last_choice": _last_choice(state) if status in {"error", "stuck"} else None,
             "url": page.get("url"),
             "title": page.get("title"),
             "text": (page.get("text") or "")[:MAX_TEXT_CHARS],

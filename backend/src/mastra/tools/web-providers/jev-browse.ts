@@ -27,7 +27,7 @@ export interface BrowseOutput {
 }
 
 interface SidecarResult {
-  status: "done" | "blocked" | "timeout" | "step_limit" | "error";
+  status: "done" | "blocked" | "stuck" | "timeout" | "step_limit" | "error";
   error?: string | null;
   url?: string | null;
   title?: string | null;
@@ -47,6 +47,7 @@ function describeStep(step: { action?: string; kind?: string; text?: string | nu
 // returned: a blocked or timed-out run often already shows the data.
 const STOP_NOTES: Record<string, string> = {
   blocked: "The browser agent could not make further progress on this page.",
+  stuck: "The page kept changing, so the browser agent's actions could not run.",
   timeout: `The browser agent ran out of time (${TASK_TIMEOUT_S}s).`,
   step_limit: "The browser agent hit its action limit.",
 };
